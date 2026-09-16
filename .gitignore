@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.env
+.streamlit/secrets.toml
+.idea/
+.vscode/
+.settings/
+*.code-workspace
+*.iml
+.project
+.classpath
+data/
+output/
+tmp/

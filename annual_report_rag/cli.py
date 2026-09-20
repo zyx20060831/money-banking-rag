@@ -91,7 +91,7 @@ def _run_documents(args: argparse.Namespace) -> int:
     for doc in manifest.get("documents", []):
         coverage = doc.get("text_layer_coverage")
         coverage_line = (
-            f"，文字层覆盖率：{coverage:.1%}" if coverage is not None else ""
+            f"，可提取文本页占比：{coverage:.1%}" if coverage is not None else ""
         )
         print(
             f"{doc['document_id']}\n"

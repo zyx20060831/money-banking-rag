@@ -68,7 +68,10 @@ def render_document_metrics(document: dict[str, Any]) -> None:
     first, second, third = st.columns(3)
     first.metric("PDF 页数", page_count)
     second.metric("可检索文本块", chunk_count)
-    third.metric("文字层覆盖率", coverage_text)
+    third.metric("可提取文本页占比", coverage_text)
+    ocr_pages = int(document.get("ocr_page_count", 0))
+    if ocr_pages:
+        st.caption(f"其中 {ocr_pages} 页使用 OCR。此占比不代表识别准确率，财务数字及表格行列关系需对照 PDF 复核。")
 
 
 def render_evidence(result: QAResult) -> None:

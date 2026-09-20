@@ -11,7 +11,7 @@ from typing import Any
 import pdfplumber
 
 from .models import Chunk
-from .ocr import PageOCR
+from .ocr import PageOCR, ocr_dependencies_available
 from .text_utils import (
     clean_page_lines,
     detect_section,
@@ -149,25 +149,31 @@ def extract_pdf(
     ocr_page_indices: list[int] = []
     ocr: PageOCR | None = None
 
-    with pdfplumber.open(pdf_path) as pdf:
-        for page_number, page in enumerate(pdf.pages, start=1):
-            deduped_page = page.dedupe_chars(tolerance=1, extra_attrs=("fontname", "size"))
-            text = deduped_page.extract_text(x_tolerance=2, y_tolerance=3) or ""
-            lines = text.splitlines()
-            # 无内嵌文字层的页面尝试 OCR 补全（扫描件）；OCR 依赖缺失时保持空页
-            if not any(line.strip() for line in lines):
-                embedded_empty_pages.append(page_number)
-                if ocr is None:
-                    ocr = PageOCR(pdf_path)
-                if ocr.available:
-                    ocr_text = ocr.ocr(page_number - 1)
-                    if ocr_text.strip():
-                        lines = ocr_text.splitlines()
-                        ocr_page_indices.append(page_number)
-            raw_pages.append(lines)
-
-    if ocr is not None:
-        ocr.close()
+    ocr_failed_pages: list[int] = []
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page_number, page in enumerate(pdf.pages, start=1):
+                deduped_page = page.dedupe_chars(tolerance=1, extra_attrs=("fontname", "size"))
+                text = deduped_page.extract_text(x_tolerance=2, y_tolerance=3) or ""
+                lines = text.splitlines()
+                if not any(line.strip() for line in lines):
+                    embedded_empty_pages.append(page_number)
+                    if ocr is None:
+                        ocr = PageOCR(pdf_path)
+                    if ocr.available:
+                        try:
+                            ocr_text = ocr.ocr(page_number - 1)
+                        except Exception as exc:
+                            ocr_failed_pages.append(page_number)
+                            print(f"[OCR 警告] {pdf_path.name} 第 {page_number} 页识别失败（{type(exc).__name__}），继续处理其他页。")
+                            ocr_text = ""
+                        if ocr_text.strip():
+                            lines = ocr_text.splitlines()
+                            ocr_page_indices.append(page_number)
+                raw_pages.append(lines)
+    finally:
+        if ocr is not None:
+            ocr.close()
 
     repeated_margin_keys = find_repeated_margin_keys(raw_pages, margin_lines=margin_lines)
     page_count = len(raw_pages)
@@ -236,6 +242,7 @@ def extract_pdf(
         "embedded_text_layer_coverage": embedded_text_layer_coverage,
         "ocr_page_count": len(ocr_page_indices),
         "ocr_page_indices": ocr_page_indices,
+        "ocr_failed_pages": ocr_failed_pages,
         "chunks_path": str(chunks_path.resolve()),
         "pages_path": str(pages_path.resolve()),
         "extractor": "pdfplumber",
@@ -292,9 +299,16 @@ def build_corpus(
             and cached.get("source_size") == stat.st_size
             and cached.get("source_mtime_ns") == stat.st_mtime_ns
         )
-        output_exists = cached and Path(cached["chunks_path"]).exists()
+        output_exists = cached and all(
+            Path(cached[key]).exists() for key in ("chunks_path", "pages_path")
+        )
+        retry_ocr = (
+            cached
+            and cached.get("empty_text_page_count", 0) > 0
+            and ocr_dependencies_available()
+        )
 
-        if not force and settings_match and source_match and output_exists:
+        if not force and settings_match and source_match and output_exists and not retry_ocr:
             print(f"[跳过] 索引未变化：{pdf_path.name}")
             documents.append(cached)
             continue
@@ -310,22 +324,22 @@ def build_corpus(
         print(
             f"[完成] {document['page_count']} 页，"
             f"{document['chunk_count']} 块，{document['text_char_count']} 字符，"
-            f"文字层覆盖 {document['extractable_text_page_count']}/"
+            f"可提取文本覆盖 {document['extractable_text_page_count']}/"
             f"{document['page_count']} 页 "
             f"({document['text_layer_coverage']:.1%})"
             f"{'，OCR 补全 ' + str(document['ocr_page_count']) + ' 页' if document['ocr_page_count'] else ''}"
         )
-        if document["embedded_text_layer_coverage"] < 0.9:
-            if document["ocr_page_count"]:
-                print(
-                    f"[OCR] {pdf_path.name} 有 {document['ocr_page_count']} 页无内嵌文字层，"
-                    "已用 OCR 补全，重要数字建议对照原文复核。"
-                )
-            else:
-                print(
-                    f"[警告] {pdf_path.name} 有 {document['empty_text_page_count']} 页无文字层"
-                    "且 OCR 不可用，可能是扫描版 PDF。请安装 rapidocr-onnxruntime 后重新 build。"
-                )
+        if document["ocr_page_count"]:
+            print(
+                f"[OCR] {pdf_path.name} 已补全 {document['ocr_page_count']} 页，"
+                "重要数字及表格行列关系需对照原文复核。"
+            )
+        if document["empty_text_page_count"]:
+            print(
+                f"[警告] {pdf_path.name} 仍有 {document['empty_text_page_count']} 页未提取到文本，"
+                "请检查是否为空白页、扫描质量及 pymupdf / rapidocr-onnxruntime 依赖。"
+                "依赖可用时再次 build 会重试这些不完整文档。"
+            )
         documents.append(document)
 
     data_dir.mkdir(parents=True, exist_ok=True)

@@ -13,6 +13,10 @@ def _dependencies() -> tuple | None:
     return fitz, RapidOCR
 
 
+def ocr_dependencies_available() -> bool:
+    return _dependencies() is not None
+
+
 class PageOCR:
     """把 PDF 页面渲染成图片并用 RapidOCR 识别，用于补全无文字层的扫描页。"""
 

@@ -11,6 +11,7 @@ from typing import Any
 import pdfplumber
 
 from .models import Chunk
+from .ocr import PageOCR
 from .text_utils import (
     clean_page_lines,
     detect_section,
@@ -19,7 +20,7 @@ from .text_utils import (
 )
 
 
-EXTRACTOR_SCHEMA_VERSION = 2
+EXTRACTOR_SCHEMA_VERSION = 3
 
 
 def make_document_id(path: Path) -> str:
@@ -144,14 +145,32 @@ def extract_pdf(
     pdf_path = pdf_path.resolve()
     document_id = make_document_id(pdf_path)
     raw_pages: list[list[str]] = []
+    embedded_empty_pages: list[int] = []
+    ocr_page_indices: list[int] = []
+    ocr: PageOCR | None = None
 
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
+        for page_number, page in enumerate(pdf.pages, start=1):
             deduped_page = page.dedupe_chars(tolerance=1, extra_attrs=("fontname", "size"))
             text = deduped_page.extract_text(x_tolerance=2, y_tolerance=3) or ""
-            raw_pages.append(text.splitlines())
+            lines = text.splitlines()
+            # 无内嵌文字层的页面尝试 OCR 补全（扫描件）；OCR 依赖缺失时保持空页
+            if not any(line.strip() for line in lines):
+                embedded_empty_pages.append(page_number)
+                if ocr is None:
+                    ocr = PageOCR(pdf_path)
+                if ocr.available:
+                    ocr_text = ocr.ocr(page_number - 1)
+                    if ocr_text.strip():
+                        lines = ocr_text.splitlines()
+                        ocr_page_indices.append(page_number)
+            raw_pages.append(lines)
+
+    if ocr is not None:
+        ocr.close()
 
     repeated_margin_keys = find_repeated_margin_keys(raw_pages, margin_lines=margin_lines)
+    page_count = len(raw_pages)
     extractable_text_pages = sum(
         1 for raw_lines in raw_pages if "\n".join(raw_lines).strip()
     )
@@ -160,8 +179,13 @@ def extract_pdf(
         for page_number, raw_lines in enumerate(raw_pages, start=1)
         if not "\n".join(raw_lines).strip()
     ]
+    embedded_text_page_count = page_count - len(embedded_empty_pages)
+    embedded_text_layer_coverage = (
+        embedded_text_page_count / page_count if page_count else 0.0
+    )
+    # 最终可检索覆盖率 = 内嵌文字层 + OCR 补全
     text_layer_coverage = (
-        extractable_text_pages / len(raw_pages) if raw_pages else 0.0
+        extractable_text_pages / page_count if page_count else 0.0
     )
     page_records: list[dict[str, Any]] = []
     chunk_records: list[dict[str, Any]] = []
@@ -209,6 +233,9 @@ def extract_pdf(
         "empty_text_page_count": len(empty_text_pages),
         "empty_text_pages": empty_text_pages,
         "text_layer_coverage": text_layer_coverage,
+        "embedded_text_layer_coverage": embedded_text_layer_coverage,
+        "ocr_page_count": len(ocr_page_indices),
+        "ocr_page_indices": ocr_page_indices,
         "chunks_path": str(chunks_path.resolve()),
         "pages_path": str(pages_path.resolve()),
         "extractor": "pdfplumber",
@@ -286,12 +313,19 @@ def build_corpus(
             f"文字层覆盖 {document['extractable_text_page_count']}/"
             f"{document['page_count']} 页 "
             f"({document['text_layer_coverage']:.1%})"
+            f"{'，OCR 补全 ' + str(document['ocr_page_count']) + ' 页' if document['ocr_page_count'] else ''}"
         )
-        if document["text_layer_coverage"] < 0.9:
-            print(
-                f"[警告] {pdf_path.name} 有较多页面无法直接提取文字，"
-                "可能是扫描版 PDF。当前项目不包含 OCR，请先进行 OCR 后再建立索引。"
-            )
+        if document["embedded_text_layer_coverage"] < 0.9:
+            if document["ocr_page_count"]:
+                print(
+                    f"[OCR] {pdf_path.name} 有 {document['ocr_page_count']} 页无内嵌文字层，"
+                    "已用 OCR 补全，重要数字建议对照原文复核。"
+                )
+            else:
+                print(
+                    f"[警告] {pdf_path.name} 有 {document['empty_text_page_count']} 页无文字层"
+                    "且 OCR 不可用，可能是扫描版 PDF。请安装 rapidocr-onnxruntime 后重新 build。"
+                )
         documents.append(document)
 
     data_dir.mkdir(parents=True, exist_ok=True)

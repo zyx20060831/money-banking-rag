@@ -6,8 +6,27 @@ import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 from .models import Evidence
+
+
+def _load_dotenv() -> None:
+    """读取项目根目录 .env，把 KEY=VALUE 注入 os.environ（已存在的环境变量优先）。"""
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    try:
+        lines = env_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 
 SYSTEM_PROMPT = """你是严谨的货币银行学分析助手，围绕商业银行经营（存贷款、净息差、流动性、资本充足率、信用风险）与货币政策、外汇储备、银行流动性和宏观金融进行分析。
@@ -30,6 +49,7 @@ class LLMConfig:
 
     @classmethod
     def from_environment(cls) -> "LLMConfig | None":
+        _load_dotenv()
         model = os.getenv("RAG_MODEL", "").strip()
         if not model:
             return None

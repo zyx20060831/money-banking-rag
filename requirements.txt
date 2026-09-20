@@ -1,2 +1,4 @@
 pdfplumber>=0.11,<0.12
 streamlit>=1.37,<2
+pymupdf>=1.24,<2
+rapidocr-onnxruntime>=1.2,<2
